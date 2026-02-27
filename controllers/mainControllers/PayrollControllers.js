@@ -2,42 +2,52 @@ const mongoose = require("mongoose");
 const Payroll = require("../../model/masterModels/Payroll");
 
 // Small helper: allow both old + new field names
-function normalizePayload(body) {
+function normalizePayload(body, { patch = false } = {}) {
+  // helper: only include key if present in request (patch mode)
+  const pick = (key, value) => {
+    if (patch && value === undefined) return {};
+    return { [key]: value };
+  };
+
+  // helper: number conversion only if present (patch mode)
+  const num = (key, value) => {
+    if (patch && value === undefined) return {};
+    const n = Number(value);
+    return { [key]: Number.isFinite(n) ? n : 0 }; // for create, fallback to 0
+  };
+
   return {
-    physioId: body.physioId,
+    ...pick("physioId", body.physioId),
 
-    // month/year/date (support both naming styles)
-    payrRollMonth: body.payrRollMonth || body.month,
-    payrRollYear: body.payrRollYear || body.year,
-    payRollDate: body.payRollDate || body.Date || body.date,
+    ...pick("payrRollMonth", body.payrRollMonth ?? body.month),
+    ...pick("payrRollYear", body.payrRollYear ?? body.year),
+    ...pick("payRollDate", body.payRollDate ?? body.Date ?? body.date),
 
-    // sessions
-    payrRollCompletedSessions:
-      body.payrRollCompletedSessions || body.completedSession || 0,
-    payrRollCancelledSession:
-      body.payrRollCancelledSession || body.cancelledSession || 0,
+    ...num(
+      "payrRollCompletedSessions",
+      body.payrRollCompletedSessions ?? body.completedSession,
+    ),
+    ...num(
+      "payrRollCancelledSession",
+      body.payrRollCancelledSession ?? body.cancelledSession,
+    ),
 
-    // petrol
-    PetrolKm: body.PetrolKm || 0,
-    PetrolAmount: body.PetrolAmount || 0,
-    amountperKm: body.amountperKm || 0,
+    ...num("PetrolKm", body.PetrolKm),
+    ...num("PetrolAmount", body.PetrolAmount),
+    ...num("amountperKm", body.amountperKm),
 
-    // salary components
-    basicSalary: body.basicSalary || 0,
-    vehicleMaintanance: body.vehicleMaintanance || 0,
-    Incentive: body.Incentive || 0,
+    ...num("basicSalary", body.basicSalary),
+    ...num("vehicleMaintanance", body.vehicleMaintanance),
+    ...num("Incentive", body.Incentive),
 
-    // leave/deductions
-    NoofLeave: body.NoofLeave || 0,
-    TotalAmountDeducted: body.TotalAmountDeducted || 0,
+    ...num("NoofLeave", body.NoofLeave),
+    ...num("TotalAmountDeducted", body.TotalAmountDeducted),
 
-    // statutory
-    ESI: body.ESI || 0,
-    PF: body.PF || 0,
+    ...num("ESI", body.ESI),
+    ...num("PF", body.PF),
 
-    // totals
-    TotalSalary: body.TotalSalary || 0,
-    NetSalary: body.NetSalary || 0,
+    ...num("TotalSalary", body.TotalSalary),
+    ...num("NetSalary", body.NetSalary),
   };
 }
 
@@ -128,7 +138,6 @@ exports.getPayrollById = async (req, res) => {
   }
 };
 
-// ✅ UPDATE
 exports.updatePayroll = async (req, res) => {
   try {
     const { _id, ...rest } = req.body;
@@ -137,18 +146,11 @@ exports.updatePayroll = async (req, res) => {
       return res.status(400).json({ message: "Invalid ID" });
     }
 
-    // normalize any incoming fields
-    const normalized = normalizePayload(rest);
+    const normalized = normalizePayload(rest, { patch: true });
 
-    // Remove undefined keys so they don’t overwrite existing values
     Object.keys(normalized).forEach((k) => {
       if (normalized[k] === undefined) delete normalized[k];
     });
-
-    // Avoid updating identity keys if you don't want
-    // delete normalized.physioId;
-    // delete normalized.payrRollMonth;
-    // delete normalized.payrRollYear;
 
     const updated = await Payroll.findByIdAndUpdate(
       _id,
@@ -159,6 +161,23 @@ exports.updatePayroll = async (req, res) => {
     if (!updated) {
       return res.status(404).json({ message: "Payroll not found" });
     }
+
+    const totalSalary =
+      Number(updated.basicSalary || 0) +
+      Number(updated.vehicleMaintanance || 0) +
+      Number(updated.PetrolAmount || 0) +
+      Number(updated.Incentive || 0);
+
+    const netSalary =
+      totalSalary -
+      Number(updated.TotalAmountDeducted || 0) -
+      Number(updated.ESI || 0) -
+      Number(updated.PF || 0);
+
+    updated.TotalSalary = totalSalary;
+    updated.NetSalary = netSalary;
+
+    await updated.save();
 
     return res.status(200).json({
       message: "Payroll updated successfully",

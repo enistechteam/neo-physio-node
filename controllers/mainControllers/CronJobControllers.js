@@ -166,7 +166,9 @@ exports.initSessionCron = (io) => {
 
 exports.initMonthlyBillingGeneration = (io) => {
   cron.schedule(
-    "31 12 26 2 *",
+    // "31 12 26 2 *",
+    "0 8 28-31 * *",
+
     async () => {
       console.log("🔔 Monthly Billing Cron Triggered...");
       const today = new Date();
@@ -560,35 +562,25 @@ exports.initReturnJourneyAllowanceCron = () => {
 
 exports.initMonthlyPayrollCron = () => {
   cron.schedule(
-    "31 11 * * *",
+    "30 9 28-31 * *",
+
+    // "44 15 * * *",
     async () => {
       try {
         const today = new Date();
-        const lastDayOfMonthDate = new Date(
+
+        const startRange = new Date(
           today.getFullYear(),
-          today.getMonth() + 1,
+          today.getMonth() - 1,
+          20,
+          0,
+          0,
           0,
         );
-        const daysInMonth = lastDayOfMonthDate.getDate();
-
-        // if (today.getDate() !== daysInMonth) return;
-
-        console.log(
-          `🚀 Starting Payroll Generation for ${daysInMonth} days month...`,
-        );
-
-        const startOfMonth = new Date(
+        const endRange = new Date(
           today.getFullYear(),
           today.getMonth(),
-          1,
-          0,
-          0,
-          0,
-        );
-        const endOfMonth = new Date(
-          today.getFullYear(),
-          today.getMonth(),
-          daysInMonth,
+          20,
           23,
           59,
           59,
@@ -597,17 +589,72 @@ exports.initMonthlyPayrollCron = () => {
         const monthName = today.toLocaleString("default", { month: "long" });
         const year = today.getFullYear();
 
+        // console.log(`\n====================================================`);
+        // console.log(`🚀 PAYROLL DEBUG SESSION: ${monthName} ${year}`);
+        // console.log(`📅 Cycle: ${startRange.toISOString()} TO ${endRange.toISOString()}`);
+        // console.log(`====================================================\n`);
+
         const COMPLETED_STATUS_ID = "691ec69eae0e10763c8f21e0";
         const CANCELLED_STATUS_ID = "691ecb36b87c5c57dead47a7";
 
         const physios = await Physio.find({ isActive: true });
 
         for (const physio of physios) {
+          // console.log(`\n👤 PHYSIO: ${physio.physioName} [${physio._id}]`);
+
+          const rawPetrolRecords = await PetrolAllowance.find({
+            physioId: physio._id,
+            date: { $gte: startRange, $lte: endRange },
+          }).lean();
+
+          // console.log(`--- ⛽ RAW PETROL DATA CHECK ---`);
+          if (rawPetrolRecords.length === 0) {
+            // console.log(`⚠️  No Petrol records found at all for this date range.`);
+          } else {
+            let debugTotalKm = 0;
+            rawPetrolRecords.forEach((rec, index) => {
+              debugTotalKm += rec.finalDailyKms || 0;
+              // console.log(
+              //   `[${index + 1}] Date: ${rec.date.toISOString().split('T')[0]} | ` +
+              //   `Kms: ${rec.finalDailyKms} | ` +
+              //   `Status: ${rec.status} | ` +
+              //   `Approved: ${rec.status === "Approved" || rec.status === "Paid" ? "YES" : "NO"}`
+              // );
+            });
+            // console.log(`Total Kms in DB (Regardless of Status): ${debugTotalKm} km`);
+          }
+
+          // --- 3. ACTUAL AGGREGATION (Used for Payroll) ---
+          const petrolStats = await PetrolAllowance.aggregate([
+            {
+              $match: {
+                physioId: physio._id,
+                date: { $gte: startRange, $lte: endRange },
+                // Loophole Check: If your records are 'Pending', this match fails.
+                status: { $in: ["Approved", "Paid"] },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalKm: { $sum: "$finalDailyKms" },
+              },
+            },
+          ]);
+
+          const totalKm = petrolStats[0]?.totalKm || 0;
+          const amountPerKm = physio.physioPetrolAlw || 0;
+          const totalPetrolAmount = totalKm * amountPerKm;
+
+          // console.log(`📊 Aggregation Result (Approved Only): ${totalKm} km`);
+          // console.log(`💰 Petrol Calculation: ${totalKm} * ₹${amountPerKm} = ₹${totalPetrolAmount}`);
+
+          // --- 4. SESSIONS & LEAVES ---
           const sessionStats = await Session.aggregate([
             {
               $match: {
                 physioId: physio._id,
-                sessionDate: { $gte: startOfMonth, $lte: endOfMonth },
+                sessionDate: { $gte: startRange, $lte: endRange },
               },
             },
             {
@@ -646,56 +693,27 @@ exports.initMonthlyPayrollCron = () => {
           ]);
 
           const completedCount = sessionStats[0]?.completed || 0;
-          const cancelledCount = sessionStats[0]?.cancelled || 0;
-
-          const petrolStats = await PetrolAllowance.aggregate([
-            {
-              $match: {
-                physioId: physio._id,
-                date: { $gte: startOfMonth, $lte: endOfMonth },
-                status: "Approved",
-              },
-            },
-            {
-              $group: {
-                _id: null,
-                totalKm: { $sum: "$finalDailyKms" },
-                totalAmount: { $sum: "$totalAmount" },
-              },
-            },
-          ]);
-
-          const totalKm = petrolStats[0]?.totalKm || 0;
-          const totalPetrolAmount = totalKm * (physio.physioPetrolAlw || 0);
-
           const unpaidLeaveDays = await LeaveModel.countDocuments({
             physioId: physio._id,
-            LeaveDate: { $gte: startOfMonth, $lte: endOfMonth },
+            LeaveDate: { $gte: startRange, $lte: endRange },
             PaidLeave: false,
             isActive: true,
           });
 
+          // --- 5. SALARY CALCULATIONS ---
           const basicSalary = physio.physioSalary || 0;
-
-          // Calculation: (30000 / 30) * 3
-          const FIXED_DAYS_FOR_SALARY = 30;
-          const perDaySalary = basicSalary / FIXED_DAYS_FOR_SALARY;
+          const perDaySalary = basicSalary / 30; // Fixed 30 days logic
           const totalAmountDeducted = Math.round(
             perDaySalary * unpaidLeaveDays,
           );
-          // --- 4. FINAL SALARY CALCULATION ---
           const maintenance = physio.physioVehicleMTC || 0;
           const incentiveTotal = (physio.physioIncentive || 0) * completedCount;
 
-          // Optional: Statutory deductions (ESI/PF)
-          const ESI = 0;
-          const PF = 0;
-
           const totalGrossSalary =
             basicSalary + maintenance + incentiveTotal + totalPetrolAmount;
-          const netSalary = totalGrossSalary - totalAmountDeducted - ESI - PF;
+          const netSalary = totalGrossSalary - totalAmountDeducted;
 
-          // 5. Save or Update Payroll
+          // --- 6. UPSERT PAYROLL ---
           await Payroll.findOneAndUpdate(
             {
               physioId: physio._id,
@@ -705,37 +723,28 @@ exports.initMonthlyPayrollCron = () => {
             {
               payRollDate: today,
               payrRollCompletedSessions: completedCount,
-              payrRollCancelledSession: cancelledCount,
+              payrRollCancelledSession: sessionStats[0]?.cancelled || 0,
               PetrolKm: totalKm,
-              PetrolAmount: totalPetrolAmount,
+              PetrolAmount: Math.round(totalPetrolAmount),
               basicSalary: basicSalary,
               vehicleMaintanance: maintenance,
-              ESI: Math.round(ESI),
-              PF: Math.round(PF),
               Incentive: incentiveTotal,
-              amountperKm: physio.physioPetrolAlw,
+              amountperKm: amountPerKm,
               NoofLeave: unpaidLeaveDays,
               TotalAmountDeducted: totalAmountDeducted,
               TotalSalary: Math.round(totalGrossSalary),
               NetSalary: Math.round(netSalary),
+              payrollCycleStart: startRange,
+              payrollCycleEnd: endRange,
             },
             { upsert: true, new: true },
           );
-
-          console.log(
-            `✅ Payroll created for ${physio.physioName}: Leaves: ${unpaidLeaveDays}, Deduction: ₹${totalAmountDeducted}`,
-          );
         }
-
-        console.log(
-          `🏁 Monthly Payroll Generation for ${monthName} completed.`,
-        );
+        console.log(`\n✅ Payroll Debug Session Finished.`);
       } catch (error) {
         console.error("❌ Payroll Cron Error:", error);
       }
     },
-    {
-      timezone: "Asia/Kolkata",
-    },
+    { timezone: "Asia/Kolkata" },
   );
 };

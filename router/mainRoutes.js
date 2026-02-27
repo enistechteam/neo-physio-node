@@ -152,6 +152,10 @@ router.post(
   "/PetrolAllowance/getAllPetrolAllowance",
   PetrolAllowanceControllers.getAllPetrol,
 );
+router.post(
+  "/PetrolAllowance/updateManualKms",
+  PetrolAllowanceControllers.updateManualKms,
+);
 router.post("/PetrolAllowance/ApprovePetrolAllowance", PetrolAllowanceControllers.ApprovePetrol);
 //DashBoardControllers
 router.post("/DashBoard/getAllDashBoard", DashBoardControllers.getAllDashBoard);
